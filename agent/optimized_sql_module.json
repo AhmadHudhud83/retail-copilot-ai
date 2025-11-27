@@ -1,0 +1,195 @@
+{
+  "generate": {
+    "traces": [],
+    "train": [],
+    "demos": [
+      {
+        "augmented": true,
+        "question": "What was the average order value in Winter 1997?",
+        "schema_context": {
+          "orders": [
+            "OrderID",
+            "OrderDate"
+          ],
+          "order_items": [
+            "OrderID",
+            "UnitPrice",
+            "Quantity",
+            "Discount"
+          ]
+        },
+        "context": "Compute AOV using UnitPrice*Quantity*(1-Discount), for December 1997 orders.",
+        "sql_query": "SELECT AVG(od.UnitPrice * od.Quantity * (1 - od.Discount)) AS AverageOrderValue\nFROM \"order_items\" od\nJOIN orders o ON od.OrderID = o.OrderID\nWHERE strftime('%Y-%m', o.\"OrderDate\") = '1997-12';"
+      },
+      {
+        "augmented": true,
+        "question": "Which are the top 3 products by total revenue of all time?",
+        "schema_context": {
+          "order_items": [
+            "OrderID",
+            "ProductID",
+            "UnitPrice",
+            "Quantity",
+            "Discount"
+          ],
+          "products": [
+            "ProductID",
+            "ProductName"
+          ]
+        },
+        "context": "Sum revenue per product accounting for discounts, order descending, limit 3.",
+        "sql_query": "\nSELECT p.ProductName, SUM(od.UnitPrice * od.Quantity * (1 - od.Discount)) AS TotalRevenue\nFROM \"order_items\" od\nJOIN products p ON od.ProductID = p.ProductID\nGROUP BY p.ProductName\nORDER BY TotalRevenue DESC\nLIMIT 3;\n        "
+      },
+      {
+        "question": "How is Gross Margin calculated?",
+        "schema_context": {},
+        "context": "Refer to KPI definitions document for the gross margin formula.",
+        "sql_query": ""
+      },
+      {
+        "question": "How is Average Order Value (AOV) calculated?",
+        "schema_context": {},
+        "context": "Refer to KPI definitions document for the formula.",
+        "sql_query": ""
+      },
+      {
+        "question": "What was the total revenue for Beverages during Summer 1997?",
+        "schema_context": {
+          "orders": [
+            "OrderID",
+            "OrderDate"
+          ],
+          "order_items": [
+            "OrderID",
+            "ProductID",
+            "UnitPrice",
+            "Quantity",
+            "Discount"
+          ],
+          "products": [
+            "ProductID",
+            "CategoryID"
+          ],
+          "categories": [
+            "CategoryID",
+            "CategoryName"
+          ]
+        },
+        "context": "Sum revenue for Beverages during Summer 1997 using UnitPrice*Quantity*(1-Discount).",
+        "sql_query": "\nSELECT SUM(od.UnitPrice * od.Quantity * (1 - od.Discount)) AS Revenue\nFROM \"order_items\" od\nJOIN orders o ON od.OrderID = o.OrderID\nJOIN products p ON od.ProductID = p.ProductID\nJOIN categories c ON p.CategoryID = c.CategoryID\nWHERE c.CategoryName = 'Beverages'\nAND o.OrderDate BETWEEN '1997-06-01' AND '1997-06-30';\n        "
+      },
+      {
+        "question": "What is the return period for perishable products like Produce and Seafood?",
+        "schema_context": {},
+        "context": "Check the product_policy document for perishable items (Produce, Seafood, Dairy).",
+        "sql_query": ""
+      },
+      {
+        "question": "Which category generated the most sales in 1997?",
+        "schema_context": {
+          "orders": [
+            "OrderID",
+            "OrderDate"
+          ],
+          "order_items": [
+            "OrderID",
+            "ProductID",
+            "Quantity",
+            "UnitPrice",
+            "Discount"
+          ],
+          "products": [
+            "ProductID",
+            "CategoryID"
+          ],
+          "categories": [
+            "CategoryID",
+            "CategoryName"
+          ]
+        },
+        "context": "Sum revenue per category for the year 1997, considering discounts.",
+        "sql_query": "\nSELECT c.CategoryName, SUM(od.UnitPrice * od.Quantity * (1 - od.Discount)) AS Revenue\nFROM \"Order Details\" od\nJOIN orders o ON od.OrderID = o.OrderID\nJOIN products p ON od.ProductID = p.ProductID\nJOIN categories c ON p.CategoryID = c.CategoryID\nWHERE strftime('%Y', o.OrderDate) = '1997'\nGROUP BY c.CategoryName\nORDER BY Revenue DESC\nLIMIT 1;\n        "
+      },
+      {
+        "question": "Which customer had the highest gross margin in 1997?",
+        "schema_context": {
+          "orders": [
+            "OrderID",
+            "CustomerID",
+            "OrderDate"
+          ],
+          "order_items": [
+            "OrderID",
+            "UnitPrice",
+            "Quantity",
+            "Discount"
+          ],
+          "customers": [
+            "CustomerID"
+          ]
+        },
+        "context": "Compute gross margin per customer using UnitPrice*Quantity*(1-Discount) minus estimated COGS (70% of UnitPrice if missing).",
+        "sql_query": "\nSELECT c.CustomerID, SUM((od.UnitPrice * (1 - od.Discount) * od.Quantity) - COALESCE(NULLIF(od.UnitPrice, NULL) * 0.7, 0)) AS gross_margin\nFROM \"Order Details\" od\nJOIN orders o ON od.OrderID = o.OrderID\nJOIN customers c ON o.CustomerID = c.CustomerID\nWHERE strftime('%Y', o.OrderDate) = '1997'\nGROUP BY c.CustomerID\nORDER BY gross_margin DESC\nLIMIT 1;\n        "
+      },
+      {
+        "question": "Which product category had the highest quantity sold during Summer 1997?",
+        "schema_context": {
+          "orders": [
+            "OrderID",
+            "OrderDate"
+          ],
+          "order_items": [
+            "OrderID",
+            "ProductID",
+            "Quantity"
+          ],
+          "products": [
+            "ProductID",
+            "CategoryID"
+          ],
+          "categories": [
+            "CategoryID",
+            "CategoryName"
+          ]
+        },
+        "context": "Join order_items → orders → products → categories; sum quantities for 'Summer 1997' dates.",
+        "sql_query": "\nSELECT c.CategoryName, SUM(od.Quantity) AS TotalQuantity\nFROM \"order_items\" od\nJOIN products p ON od.ProductID = p.ProductID\nJOIN categories c ON p.CategoryID = c.CategoryID\nJOIN orders o ON od.OrderID = o.OrderID\nWHERE o.\"OrderDate\" BETWEEN '1997-06-01' AND '1997-08-31'\nGROUP BY c.CategoryName\nORDER BY TotalQuantity DESC\nLIMIT 1;\n        "
+      },
+      {
+        "question": "How many days can I return unopened Beverages?",
+        "schema_context": {},
+        "context": "Check the product_policy document for return durations of different categories.",
+        "sql_query": ""
+      }
+    ],
+    "signature": {
+      "instructions": "You are a SQLite expert. Your only task is to generate a valid SQL query\nthat answers the question based on the schema_context and context.\nDo NOT invent or assume any final numeric values.\nOnly produce the SQL query string.",
+      "fields": [
+        {
+          "prefix": "Question:",
+          "description": "The question to translate into SQL"
+        },
+        {
+          "prefix": "Schema Context:",
+          "description": "Dictionary of table names to their column names"
+        },
+        {
+          "prefix": "Context:",
+          "description": "Additional constraints, business rules, or notes from docs"
+        },
+        {
+          "prefix": "Sql Query:",
+          "description": "Valid SQLite query string; do NOT include hardcoded answers or values"
+        }
+      ]
+    },
+    "lm": null
+  },
+  "metadata": {
+    "dependency_versions": {
+      "python": "3.10",
+      "dspy": "3.0.4",
+      "cloudpickle": "3.1"
+    }
+  }
+}
