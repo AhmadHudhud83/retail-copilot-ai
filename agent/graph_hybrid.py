@@ -1,6 +1,5 @@
-# graph_hybrid.py
 import dspy
-from typing import  List, Dict, Any, TypedDict, Union
+from typing import List, Dict, Any, TypedDict, Union
 from langgraph.graph import StateGraph, END
 from rich.console import Console
 
@@ -11,10 +10,28 @@ from agent.dspy_signatures import (
     TextToSQL, 
     GenerateAnswer, 
 )
-# Import the enhanced debugger
 from agent.rag.utils.debug_utils import tracker
 
 console = Console()
+
+# --- 0. Planner Signature (Local) ---
+class PlannerSignature(dspy.Signature):
+    """
+    Analyze the docs and question to produce SQL constraints.
+    
+    CRITICAL DATE RULES:
+    - If the docs mention a specific date range (e.g. "Summer 1997: 1997-06-01 to 1997-06-30"), 
+      YOU MUST output standard SQL: "OrderDate BETWEEN '1997-06-01' AND '1997-06-30'".
+    - Do NOT use the current year. Use ONLY the years found in the docs (usually 1996-1998).
+    
+    KPI RULES:
+    - If 'Gross Margin' is mentioned, output: "Margin = (UnitPrice - UnitPrice*0.7) * Quantity".
+    """
+    context_docs = dspy.InputField(desc="Retrieved documentation content")
+    question = dspy.InputField()
+    
+    constraints = dspy.OutputField(desc="SQL snippets (e.g. 'OrderDate BETWEEN...')")
+    reasoning = dspy.OutputField(desc="Why these constraints were chosen")
 
 # --- 1. Graph State ---
 class AgentState(TypedDict):
@@ -22,29 +39,28 @@ class AgentState(TypedDict):
     format_hint: str
     
     # Analysis
-    classification: str  # rag_only, sql_only, hybrid
-    search_queries: List[str]
+    classification: str
     
     # Data Context
-    doc_chunks: List[Dict]  # From Retriever
-    doc_context_str: str    # Stringified docs for DSPy
-    extracted_constraints: str # From Planner (dates, formulas)
+    doc_chunks: List[Dict]
+    doc_context_str: str
+    extracted_constraints: str 
     
     # SQL
     schema_context: str
     sql_query: str
-    sql_result: Union[List[Dict], str] # Result list or Error string
+    sql_result: Union[List[Dict], str]
     
     # Output
     final_answer: Any
-    citations: List[str]
+    citations: List[str] # Final definitive list
     explanation: str
     
     # Repair Loop
     retry_count: int
     error: str
 
-
+# --- 2. Module Wrapper ---
 class SimpleSQLModule(dspy.Module):
     def __init__(self):
         super().__init__()
@@ -53,274 +69,184 @@ class SimpleSQLModule(dspy.Module):
     def forward(self, question, schema_context, context):
         return self.generate(question=question, schema_context=schema_context, context=context)
 
-# --- 2. Node Functions ---
+# --- 3. Node Functions ---
 
 def router_node(state: AgentState):
-    console.print(f"\n[bold cyan]🔀 Router Node[/bold cyan]")
-    console.print(f"[dim]Question: {state['question'][:80]}...[/dim]")
-    
-    # Use Predict instead of ChainOfThought for more stability on classification
+    console.print(f"\n[bold cyan]🔀 Router[/bold cyan]")
     predictor = dspy.Predict(RouterSignature)
     result = predictor(question=state["question"])
     
-    # Enhanced debug logging
-    tracker.inspect_last_call("Router")
-    
-    # Robust extraction
-    if hasattr(result, "classification"):
-        cls = result.classification.lower()
-    else:
-        cls = "rag_only" # Default fallback
-        
+    raw_cls = getattr(result, "classification", "rag_only").lower()
     final_cls = "rag_only"
-    if "sql" in cls: final_cls = "sql_only"
-    if "hybrid" in cls: final_cls = "hybrid"
+    if "sql" in raw_cls: final_cls = "sql_only"
+    if "hybrid" in raw_cls: final_cls = "hybrid"
     
-    # Log summary
-    tracker.print_step_summary("Router Decision", {
-        "classification": final_cls,
-        "raw_output": cls if hasattr(result, "classification") else "N/A"
-    })
-    
-    console.print(f"[green]✓ Route selected: {final_cls}[/green]")
+    console.print(f"  [dim]Classified as: {final_cls}[/dim]")
     return {"classification": final_cls}
 
 def retrieval_node(state: AgentState):
-    """Fetches documents."""
-    console.print(f"\n[bold cyan]📚 Retrieval Node[/bold cyan]")
-    
+    console.print(f"\n[bold cyan]📚 Retriever[/bold cyan]")
     retriever = LocalRetriever()
-    chunks = retriever.search(state["question"], k=3)
+    # Increased k to 4 to ensure calendar + policies both fit
+    chunks = retriever.search(state["question"], k=4)
     
-    context_str = "\n\n".join([f"[{c['id']}] {c['text']}" for c in chunks])
+    context_str = "\n\n".join([f"Source: {c['id']}\nContent: {c['text']}" for c in chunks])
     citations = [c['id'] for c in chunks]
     
-    # Log what was retrieved
-    tracker.print_step_summary("Documents Retrieved", {
-        "num_chunks": len(chunks),
-        "citations": citations,
-        "top_score": f"{chunks[0]['score']:.3f}" if chunks else "N/A"
-    })
-    
-    console.print(f"[green]✓ Retrieved {len(chunks)} document chunks[/green]")
-    
+    console.print(f"  [green]Found {len(chunks)} chunks[/green]")
     return {
         "doc_chunks": chunks, 
         "doc_context_str": context_str,
-        "citations": citations
+        "citations": citations # partial citations
     }
 
 def planner_node(state: AgentState):
     """
-    (Hybrid Only) Look at retrieved docs and extract constraints.
+    CRITICAL STEP: Translates "Summer 1997" -> "1997-06-01..."
     """
-    console.print(f"\n[bold cyan]🗺️  Planner Node[/bold cyan]")
-    console.print(f"[dim]Analyzing {len(state.get('doc_chunks', []))} documents...[/dim]")
+    console.print(f"\n[bold cyan]🗺️  Planner[/bold cyan]")
     
-    # Define a simple extractor
-    class PlannerSig(dspy.Signature):
-        """
-        Read the docs and the question. Extract specific SQL constraints.
-        Examples:
-        - "Summer 1997" -> "OrderDate BETWEEN '1997-06-01' AND '1997-06-30'"
-        - "Beverages" -> "CategoryName = 'Beverages'"
-        """
-        docs = dspy.InputField()
-        question = dspy.InputField()
-        constraints = dspy.OutputField(desc="SQL snippets (dates, IDs, formulas)")
-
-    planner = dspy.Predict(PlannerSig)
-    result = planner(docs=state["doc_context_str"], question=state["question"])
+    planner = dspy.Predict(PlannerSignature)
+    result = planner(
+        context_docs=state["doc_context_str"], 
+        question=state["question"]
+    )
     
-    # Log DSPy interaction
-    tracker.inspect_last_call("Planner")
+    constraints = getattr(result, "constraints", "No specific constraints.")
+    reasoning = getattr(result, "reasoning", "")
     
-    # Log extracted constraints
-    tracker.print_step_summary("Extracted Constraints", {
-        "constraints": result.constraints
-    })
+    console.print(f"  [dim]Reasoning: {reasoning[:100]}...[/dim]")
+    console.print(f"  [bold yellow]Constraints: {constraints}[/bold yellow]")
     
-    console.print(f"[green]✓ Constraints extracted[/green]")
-    return {"extracted_constraints": result.constraints}
+    return {"extracted_constraints": constraints}
 
 def sql_generation_node(state: AgentState):
-    """Generates SQL using Schema + Optional Constraints."""
-    console.print(f"\n[bold cyan]⚙️  SQL Generation Node[/bold cyan]")
+    console.print(f"\n[bold cyan]⚙️  SQL Generator[/bold cyan]")
     
     db = NorthwindDB()
     schema = db.get_schema()
     
-    # LOAD THE OPTIMIZED MODULE
-    optimizer_path = "agent/optimized_sql_module.json"
+    # Try loading optimized module
+    generator = SimpleSQLModule()
     try:
-        generator = SimpleSQLModule()
-        generator.load(optimizer_path)
-        console.print("  [green]✓ Loaded optimized DSPy module[/green]")
-    except Exception:
-        console.print("  [yellow]⚠ Using default (non-optimized) module[/yellow]")
-        generator = SimpleSQLModule() # Fallback
+        generator.load("agent/optimized_sql_module.json")
+    except:
+        pass
+
+    # Logic: Combine Planner Constraints into the prompt
+    planner_context = state.get("extracted_constraints", "")
     
-    # Logic: Handle Repair Count
-    current_retries = state.get("retry_count", 0)
-    context = state.get("extracted_constraints", "")
-    
+    # Handle Retries
+    retries = state.get("retry_count", 0)
     if state.get("error"):
-        current_retries += 1
-        console.print(f"  [yellow]🔧 Repair attempt {current_retries}/2[/yellow]")
-        console.print(f"  [dim]Previous error: {state['error'][:100]}...[/dim]")
-        context += f"\n\nPREVIOUS ERROR: {state['error']}. Fix the SQL."
+        retries += 1
+        planner_context += f"\n\nIMPORTANT: Previous query failed with error: {state['error']}. Fix the syntax."
+        console.print(f"  [red]Repairing SQL (Attempt {retries}/2)[/red]")
 
-    # Use a context manager to temporarily boost tokens for this complex step
-    with dspy.settings.context(lm=dspy.settings.lm.copy(max_tokens=1024)):
-        result = generator(
-            question=state["question"],
-            schema_context=schema,
-            context=context
-        )
+    pred = generator(
+        question=state["question"],
+        schema_context=schema,
+        context=planner_context
+    )
     
-    # Enhanced debug logging
-    tracker.inspect_last_call("SQL Generation")
+    sql = getattr(pred, "sql_query", "")
+    # Clean markdown
+    sql = sql.replace("```sql", "").replace("```", "").strip()
     
-    # Robustness check: did the model fail to output the field?
-    if not hasattr(result, 'sql_query'):
-        console.print("  [bold red]✗ Model failed to generate 'sql_query' field[/bold red]")
-        return {
-            "error": "Model failed to generate SQL format", 
-            "retry_count": current_retries + 1
-        }
-
-    clean_sql = result.sql_query.replace("```sql", "").replace("```", "").strip()
-    
-    # Log generated SQL
-    tracker.print_step_summary("SQL Generated", {
-        "sql_query": clean_sql,
-        "retry_count": current_retries,
-        "has_constraints": bool(state.get("extracted_constraints"))
-    })
-    
-    console.print(f"[green]✓ SQL generated[/green]")
-    console.print(f"[dim]{clean_sql[:100]}{'...' if len(clean_sql) > 100 else ''}[/dim]")
-    
+    console.print(f"  [dim]{sql[:80]}...[/dim]")
     return {
         "schema_context": schema,
-        "sql_query": clean_sql,
-        "retry_count": current_retries
+        "sql_query": sql,
+        "retry_count": retries
     }
 
 def sql_execution_node(state: AgentState):
-    """Runs the SQL."""
-    console.print(f"\n[bold cyan]▶️  SQL Execution Node[/bold cyan]")
-    
+    console.print(f"\n[bold cyan]▶️  Executor[/bold cyan]")
     db = NorthwindDB()
     
-    # Check if we have a query to run
     if not state.get("sql_query"):
-        console.print("  [red]✗ No SQL query to execute[/red]")
-        return {"sql_result": "No SQL generated", "error": "No SQL generated"}
-    
-    console.print(f"[dim]Executing: {state['sql_query'][:80]}...[/dim]")
+        return {"sql_result": "No SQL generated", "error": "No SQL"}
+        
     result = db.execute_query(state["sql_query"])
     
-    # Check for errors
     if isinstance(result, str) and result.startswith("SQL Error"):
-        console.print(f"  [red]✗ SQL Error: {result[:100]}...[/red]")
-        tracker.print_step_summary("SQL Execution Failed", {
-            "error": result[:200]
-        })
+        console.print(f"  [bold red]{result}[/bold red]")
         return {"sql_result": result, "error": result}
+        
+    console.print(f"  [green]Success: {len(result)} rows[/green]")
     
-    # Success
-    result_count = len(result) if isinstance(result, list) else 0
-    console.print(f"[green]✓ SQL executed successfully ({result_count} rows returned)[/green]")
+    # Add Tables to citations if successful
+    new_citations = state.get("citations", [])
+    lower_sql = state["sql_query"].lower()
+    if "orders" in lower_sql: new_citations.append("Orders")
+    if "order_items" in lower_sql: new_citations.append("Order Details")
+    if "products" in lower_sql: new_citations.append("Products")
+    if "customers" in lower_sql: new_citations.append("Customers")
     
-    tracker.print_step_summary("SQL Execution Success", {
-        "rows_returned": result_count,
-        "first_row": result[0] if result and isinstance(result, list) else "N/A"
-    })
-    
-    return {"sql_result": result, "error": None}
+    return {"sql_result": result, "error": None, "citations": list(set(new_citations))}
 
 def synthesis_node(state: AgentState):
-    """Final Answer Generation."""
-    console.print(f"\n[bold cyan]🎯 Synthesis Node[/bold cyan]")
-    console.print("[dim]Generating final answer...[/dim]")
+    console.print(f"\n[bold cyan]🎯 Synthesizer[/bold cyan]")
     
+    # We use the Base Signature but IGNORE the model's citation output
     synthesizer = dspy.Predict(GenerateAnswer)
     
-    sql_res = str(state.get("sql_result", "No SQL run"))
-    if len(sql_res) > 2000: sql_res = sql_res[:2000] + "...(truncated)"
+    sql_res = str(state.get("sql_result", ""))[:2000] # Truncate large results
     
+    pred = synthesizer(
+        question=state["question"],
+        sql_query=state.get("sql_query", ""),
+        sql_result=sql_res,
+        doc_context=state.get("doc_context_str", ""),
+        format_hint=state["format_hint"]
+    )
+    
+    # 1. Answer & Explanation
+    final_ans = getattr(pred, "final_answer", None)
+    explanation = getattr(pred, "explanation", "No explanation.")
+    
+    # 2. Strict Type Casting (The "Audit" step)
+    fmt = state["format_hint"]
     try:
-        result = synthesizer(
-            question=state["question"],
-            sql_query=state.get("sql_query", ""),
-            sql_result=sql_res,
-            doc_context=state.get("doc_context_str", ""),
-            format_hint=state["format_hint"]
-        )
-        
-        # Enhanced debug logging
-        tracker.inspect_last_call("Synthesis")
-        
-        current_cites = state.get("citations", [])
-        new_cites = result.citations
-        
-        # Handle case where model returns string instead of list
-        if isinstance(new_cites, str):
-            new_cites = [c.strip() for c in new_cites.split(",")]
-            
-        final_cites = list(set(current_cites + (new_cites if isinstance(new_cites, list) else [])))
-        
-        # Log synthesis results
-        tracker.print_step_summary("Answer Synthesized", {
-            "final_answer": str(result.final_answer)[:100],
-            "format_hint": state["format_hint"],
-            "num_citations": len(final_cites),
-            "explanation_length": len(result.explanation)
-        })
-        
-        console.print(f"[green]✓ Answer synthesized with {len(final_cites)} citations[/green]")
-        
-        return {
-            "final_answer": result.final_answer,
-            "explanation": result.explanation,
-            "citations": final_cites
-        }
-    except Exception as e:
-        console.print(f"[bold red]✗ Synthesis failed: {e}[/bold red]")
-        return {
-            "final_answer": None, 
-            "explanation": f"Synthesis Error: {e}", 
-            "citations": state.get("citations", [])
-        }
+        if fmt == "int":
+            # Extract first number found
+            import re
+            nums = re.findall(r"[-+]?\d+", str(final_ans))
+            final_ans = int(nums[0]) if nums else 0
+        elif fmt == "float":
+            import re
+            # Find float pattern
+            nums = re.findall(r"[-+]?\d*\.\d+|\d+", str(final_ans))
+            final_ans = float(nums[0]) if nums else 0.0
+    except:
+        console.print(f"  [yellow]⚠ Type cast failed for {fmt}, keeping raw string[/yellow]")
 
-# --- 3. Edge Logic ---
+    # 3. Programmatic Citations (Reliable)
+    # We take the accumulated citations from Retriever + Executor
+    final_citations = state.get("citations", [])
+    
+    return {
+        "final_answer": final_ans,
+        "explanation": explanation,
+        "citations": final_citations, # Overwrite whatever the model might have thought
+        "confidence": 1.0 if not state.get("error") else 0.0
+    }
+
+# --- 4. Edges ---
 
 def decide_route(state: AgentState):
     return state["classification"]
 
 def check_sql_health(state: AgentState):
-    error = state.get("error")
-    retries = state.get("retry_count", 0)
-    
-    if error and retries < 2:
-        console.print(f"[yellow]🔄 Routing to repair (attempt {retries + 1}/2)[/yellow]")
+    if state.get("error") and state.get("retry_count", 0) < 2:
         return "repair"
-    
-    if error and retries >= 2:
-        console.print(f"[red]⚠ Max retries reached, proceeding with error[/red]")
-    
     return "synthesize"
 
-# --- 4. Build Graph ---
+# --- 5. Build ---
 
 def build_graph():
-    """Build and compile the LangGraph workflow."""
-    console.print("[dim]Building graph...[/dim]")
-    
     workflow = StateGraph(AgentState)
     
-    # Add Nodes
     workflow.add_node("router", router_node)
     workflow.add_node("retriever", retrieval_node)
     workflow.add_node("planner", planner_node)
@@ -328,28 +254,17 @@ def build_graph():
     workflow.add_node("executor", sql_execution_node)
     workflow.add_node("synthesizer", synthesis_node)
     
-    # Set Entry
     workflow.set_entry_point("router")
     
-    # Edges
     workflow.add_conditional_edges(
         "router",
         decide_route,
-        {
-            "rag_only": "retriever",
-            "sql_only": "sql_gen",
-            "hybrid": "retriever"
-        }
+        {"rag_only": "retriever", "sql_only": "sql_gen", "hybrid": "retriever"}
     )
     
-    def post_retrieval_route(state: AgentState):
-        if state["classification"] == "hybrid":
-            return "planner"
-        return "synthesizer"
-
     workflow.add_conditional_edges(
         "retriever",
-        post_retrieval_route,
+        lambda x: "planner" if x["classification"] == "hybrid" else "synthesizer",
         {"planner": "planner", "synthesizer": "synthesizer"}
     )
     
@@ -359,13 +274,9 @@ def build_graph():
     workflow.add_conditional_edges(
         "executor",
         check_sql_health,
-        {
-            "repair": "sql_gen",
-            "synthesize": "synthesizer"
-        }
+        {"repair": "sql_gen", "synthesize": "synthesizer"}
     )
     
     workflow.add_edge("synthesizer", END)
     
-    console.print("[green]✓ Graph compiled[/green]")
     return workflow.compile()

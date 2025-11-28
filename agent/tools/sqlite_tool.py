@@ -1,68 +1,66 @@
 import sqlite3
-import pandas as pd
-from typing import List, Dict, Any, Union
+import re
 
 class NorthwindDB:
-    def __init__(self, db_path: str = "data/northwind.sqlite"):
+    def __init__(self, db_path="data/northwind.sqlite"):
         self.db_path = db_path
 
     def get_connection(self):
-        """Creates a read-only connection to the DB."""
-        # URI mode for read-only to prevent accidental data modification
-        return sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        return sqlite3.connect(self.db_path)
 
-    def get_schema(self) -> str:
+    def get_schema(self):
         """
-        Returns a compressed text representation of the DB schema 
-        for the LLM to understand.
+        Returns a compact schema string focusing on the lowercase views 
+        to help the LLM avoid quoting hell.
         """
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # We only care about the views we created or main tables
+        # We focus on the views we created in the setup
         target_tables = ['orders', 'order_items', 'products', 'customers', 'categories', 'suppliers']
-        
-        schema_str = []
-        
+        schema_str = ""
+
         for table in target_tables:
-            # Get column info: cid, name, type, notnull, dflt_value, pk
-            cursor.execute(f"PRAGMA table_info({table})")
-            columns = cursor.fetchall()
-            
-            if not columns:
+            # Check if table/view exists first
+            try:
+                cursor.execute(f"PRAGMA table_info({table})")
+                columns = cursor.fetchall()
+                if columns:
+                    col_str = ", ".join([f"{col[1]} ({col[2]})" for col in columns])
+                    schema_str += f"Table '{table}': [{col_str}]\n"
+            except:
                 continue
                 
-            col_strs = [f"{col[1]} ({col[2]})" for col in columns]
-            schema_str.append(f"Table: {table}")
-            schema_str.append(f"Columns: {', '.join(col_strs)}")
-            schema_str.append("") # Empty line separator
-
         conn.close()
-        return "\n".join(schema_str)
+        return schema_str
 
-    def execute_query(self, sql: str) -> Union[List[Dict[str, Any]], str]:
-        """
-        Executes a SQL query and returns results as a list of dicts.
-        Returns a string error message if execution fails.
-        """
+    def execute_query(self, query: str):
+        # 1. Safety Sanity Check
+        if not query or not query.strip():
+            return "SQL Error: Empty query"
+            
+        # 2. Hard-Fix Common Hallucinations (Safety Net)
+        # Phi-3.5 loves YEAR() but SQLite hates it.
+        if "YEAR(" in query:
+            query = re.sub(r"YEAR\(([^)]+)\)", r"strftime('%Y', \1)", query)
+        if "MONTH(" in query:
+            query = re.sub(r"MONTH\(([^)]+)\)", r"strftime('%m', \1)", query)
+            
+        conn = self.get_connection()
+        cursor = conn.cursor()
         try:
-            conn = self.get_connection()
-            # pandas is great here because it handles headers automatically
-            df = pd.read_sql_query(sql, conn)
+            cursor.execute(query)
+            # Get column names
+            headers = [description[0] for description in cursor.description] if cursor.description else []
+            rows = cursor.fetchall()
             conn.close()
             
-            if df.empty:
-                return []
+            # Return list of dicts for easier processing
+            results = []
+            for row in rows:
+                results.append(dict(zip(headers, row)))
+            return results
             
-            return df.to_dict(orient="records")
-            
-        except Exception as e:
+        except sqlite3.Error as e:
+            conn.close()
             return f"SQL Error: {str(e)}"
-
-# Simple test to verify it works
-if __name__ == "__main__":
-    db = NorthwindDB()
-    print("--- Schema ---")
-    print(db.get_schema())
-    print("\n--- Test Query ---")
-    print(db.execute_query("SELECT ProductName FROM products LIMIT 3"))
