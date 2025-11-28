@@ -11,7 +11,7 @@ A local, private AI agent for retail analytics that combines **RAG** (for policy
 *   [Ollama](https://ollama.com) running locally.
 *   Pull the model:
     ```bash
-    ollama pull phi3.5:3.8b-mini-instruct-q4_K_M
+    ollama pull phi3.5:3.8b-mini-instruct-q3_K_M
     ```
 
 **2. Installation**
@@ -105,7 +105,16 @@ The agent includes a self-healing loop. If the `Executor` encounters an error (e
     ├── all_tables_check_sql.py
     ├── evaluate_improvement.py
     ├── ground_truth_answers_for_sqls.py
-    └── ...
+|-- tests
+|   |-- all_tables_check_sql.py
+|   |-- evaluate_improvement.py
+|   |-- ground_truth_answers_for_sqls.py
+|   |-- test_dspy.py
+|   |-- test_trainset.py
+|   |-- verify_sql_dates.py
+|   `-- verify_views.py
+`-- train_dspy.py
+
 ```
 
 Side Note – Data Availability Issue
