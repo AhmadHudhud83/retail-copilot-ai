@@ -60,32 +60,8 @@ python run_agent_hybrid.py --batch sample_questions_hybrid_eval.jsonl --out outp
 
 ---
 
-## 🏗️ Architecture Design
-The agent uses a **Stateful Graph** (LangGraph) with $\ge$ 6 nodes:
 
-1.  **Router:** Classifies intents (RAG-only vs. Hybrid/SQL) using DSPy.
-2.  **Retriever:** Fetches context (KPIs, Calendar) to guide the planner.
-3.  **Planner:** Extracts constraints (e.g., converts "Summer 2016" $\to$ `BETWEEN '2016-06-01' AND ...`).
-4.  **SQL Generator (DSPy):** Optimized module that converts natural language + schema + plan $\to$ SQLite.
-5.  **Executor:** Runs the query with a **Safety Net** (regex patches for common model hallucinations).
-6.  **Synthesizer:** Formats the final answer and compiles strict citations.
-7.  **Repair Loop (Resilience):** If SQL fails (e.g., "no such column"), the error maps back to the Generator for up to 2 retries.
 
----
-
-## 📊 DSPy Impact & Optimization
-**Chosen Module:** `TextToSQL` (SQL Generator)
-**Optimizer:** `BootstrapFewShot` (Metric: Execution Success + Syntax Validity)
-
-| Metric | Zero-Shot (Before) | Optimized (After) | Improvement |
-| :--- | :--- | :--- | :--- |
-| **SQL Exec Success** | ~10% | **66.7%** | **+33.3%** |
-| **Hallucinations** | Frequent `YEAR()`, `TOP`, `Cost` | None (Uses `strftime`, `LIMIT`, `0.7*Price`) | **Eliminated** |
-| **Date Logic** | Random (guessed 2022/2023) | **Correct** (Aligned to DB 2016) | **Aligned** |
-
-*Note: The optimizer successfully learned to calculate Gross Margin manually `(Price * 0.7)` instead of hallucinating a non-existent `Cost` column.*
-
----
 
 ## 🛡️ Resilience & Assumptions
 
