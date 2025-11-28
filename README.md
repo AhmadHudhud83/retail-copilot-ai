@@ -1,5 +1,3 @@
-Here is the updated **README.md** with the project structure section reflecting your actual file tree.
-
 ***
 
 # Retail Analytics Copilot (DSPy + LangGraph)
