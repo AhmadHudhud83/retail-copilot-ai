@@ -1,6 +1,5 @@
 ***
 
-# Retail Analytics Copilot (DSPy + LangGraph)
 
 # Retail Analytics Copilot (DSPy + LangGraph)
 
